@@ -73,8 +73,17 @@ python interactive_multi_picker.py \
 *   `--picks`: Path to a CSV file containing initial/auto picks to load on startup.
 *   `--filter`: Flag to apply a basic 1-10Hz Bandpass filter automatically.
 *   `--model`: AI model to use for automatic picking (`eqtransformer` or `phasenet`).
-*   `--pretrained`: Pretrained weights for the AI model (e.g., `original`, `stead`, `ethz`). Default is `original`.
+*   `--pretrained`: Pretrained weights for the AI model. Options: `original`, `stead`, `ethz`, or `korea`. Default is `original`.
 *   `--inv`: Path to the StationXML file (`.xml`) for instrument response removal.
+
+### 🇰🇷 Using Custom 'Korea' Weights
+You can use locally trained weights specifically optimized for the Korean peninsula. 
+1. Place the trained weight files (`eqtransformer_korea.pth` and/or `phasenet_korea.pth`) directly in the **root directory of this project** (the same folder as `interactive_multi_picker.py`).
+2. Run the tool using the `--pretrained korea` flag:
+
+```bash
+uv run interactive_multi_picker.py --mseed ./data/waveforms.mseed --model eqtransformer --pretrained korea
+```
 
 ---
 
