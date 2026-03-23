@@ -1,4 +1,4 @@
-# Interactive Multi-Station Earthquake Phase Picker
+# Interactive Multi-Station Phase Picker for machine learning in seismology.
 
 A Python-based interactive GUI tool for visualizing seismograms, manually picking P and S wave arrivals, and utilizing deep learning models for automatic phase picking. Built with Matplotlib and ObsPy, this tool provides an intuitive environment for seismologists to rapidly review and refine earthquake data across multiple stations.
 
