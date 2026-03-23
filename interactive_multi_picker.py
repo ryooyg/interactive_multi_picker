@@ -151,10 +151,6 @@ class MultiStationPicker:
             import seisbench
             import seisbench.models as sbm
             import torch
-            try:
-                seisbench.use_backup_repository()
-            except:
-                pass
         except ImportError:
             print("[-] seisbench가 설치되어 있지 않습니다. 'pip install seisbench torch'를 실행해주세요.")
             return
@@ -172,17 +168,53 @@ class MultiStationPicker:
                 model.cuda()
                 print("[*] GPU 가속 활성화됨")
 
-            # 대상 데이터 필터링
+            # 대상 데이터 필터링 및 3성분 교집합 구간 추출
             if station_name:
                 try:
                     net, stacode = station_name.split('.')
-                    st_to_classify = self.st_raw.select(network=net, station=stacode)
+                    st_to_classify_raw = self.st_raw.select(network=net, station=stacode)
                 except ValueError:
-                    st_to_classify = self.st_raw.select(station=station_name)
+                    st_to_classify_raw = self.st_raw.select(station=station_name)
+                    
+                # 3성분이 모두 존재하는 공통 시간 구간(Overlapping window) 찾기
+                if len(st_to_classify_raw) > 0:
+                    start_times = [tr.stats.starttime for tr in st_to_classify_raw]
+                    end_times = [tr.stats.endtime for tr in st_to_classify_raw]
+                    
+                    # 가장 늦은 시작 시간과 가장 빠른 종료 시간 찾기 (교집합)
+                    common_start = max(start_times)
+                    common_end = min(end_times)
+                    
+                    if common_start < common_end:
+                        # 교집합 구간으로 자르기 (원본 데이터 보존을 위해 copy 사용)
+                        st_to_classify = st_to_classify_raw.copy().trim(common_start, common_end)
+                        print(f"[*] 3성분 공통 구간 추출: {common_start} ~ {common_end}")
+                    else:
+                        print(f"[-] {station_name} 관측소의 3성분 데이터가 겹치는 시간 구간이 없습니다.")
+                        st_to_classify = Stream()
+                else:
+                    st_to_classify = Stream()
+                    
                 # 특정 관측소 분석 시 기존 확률 데이터 초기화
                 self.ai_annotations[station_name] = Stream()
             else:
-                st_to_classify = self.st_raw
+                # 전체 데이터를 분석할 때는 각 관측소별로 교집합 구간을 찾아야 함
+                st_to_classify = Stream()
+                groups = {}
+                for tr in self.st_raw:
+                    net_sta = f"{tr.stats.network}.{tr.stats.station}"
+                    if net_sta not in groups: groups[net_sta] = []
+                    groups[net_sta].append(tr)
+                    
+                for net_sta, tr_list in groups.items():
+                    if len(tr_list) > 0:
+                        start_times = [t.stats.starttime for t in tr_list]
+                        end_times = [t.stats.endtime for t in tr_list]
+                        common_start = max(start_times)
+                        common_end = min(end_times)
+                        if common_start < common_end:
+                            st_to_classify += Stream(tr_list).copy().trim(common_start, common_end)
+                            
                 self.ai_annotations = {}
 
             if len(st_to_classify) == 0:
@@ -415,6 +447,17 @@ class MultiStationPicker:
         self.btn_exit = add_3d_button([0.89, y, 0.065, h], 'EXIT', 'salmon')
         self.btn_exit.on_clicked(self._btn_exit_clicked)
 
+        # 화면 우측 하단에 kitvalley.png 로고 추가
+        if os.path.exists(icon_path):
+            try:
+                # [left, bottom, width, height]
+                ax_logo = self.fig.add_axes([0.88, 0.015, 0.1, 0.07], anchor='SE', zorder=10)
+                img = plt.imread(icon_path)
+                ax_logo.imshow(img)
+                ax_logo.axis('off')
+            except Exception as e:
+                print(f"[*] 화면 로고 표시 실패: {e}")
+
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
         self.fig.canvas.mpl_connect('button_press_event', self.on_click)
         self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
@@ -535,6 +578,11 @@ class MultiStationPicker:
             
         # 2. P파 도착시간(가장 빠른 시간) 순으로 정렬
         picked_stas.sort(key=lambda x: x[1])
+        first_p_time = picked_stas[0][1] # 제일 첫 P파 시간 (가장 빠른 시간)
+        
+        # 허용 그리기 범위 계산 (첫 P파 10초 전 ~ 그로부터 180초 후)
+        valid_start_time = first_p_time - (10 / 86400.0)
+        valid_end_time = valid_start_time + (180 / 86400.0)
         
         # 3. 새로운 창(Figure) 생성 - 스크롤바 공간을 위해 왼쪽 여백 확보
         self.fig_stack, self.ax_stack = plt.subplots(figsize=(10, 8))
@@ -557,6 +605,16 @@ class MultiStationPicker:
         
         # 4. 정렬된 관측소 순서대로 Z 성분 파형 그리기 (관측소 간격 없이 쌓음)
         total_picked = len(picked_stas)
+        all_pick_times = []
+        for sta, p_num in picked_stas:
+            # P, S파 모두 범위 내에 있는지 확인 후 그리기 대상에 포함
+            if valid_start_time <= p_num <= valid_end_time:
+                all_pick_times.append(p_num)
+            
+            s_num = self.picks_db[sta]['s']['mpl_num']
+            if s_num is not None and valid_start_time <= s_num <= valid_end_time:
+                all_pick_times.append(s_num)
+                
         for i, (sta, p_num) in enumerate(picked_stas):
             if sta not in self.stations:
                 self._process_station(sta)
@@ -565,9 +623,9 @@ class MultiStationPicker:
             if tr is None:
                 continue
                 
-            t_start = tr.stats.starttime
-            dt_times = [(t_start + s).datetime.replace(tzinfo=None) for s in tr.times()]
-            num_times = mdates.date2num(dt_times)
+            # 시간 정밀도 문제 해결 및 속도 향상을 위한 벡터화 연산
+            t0 = mdates.date2num(tr.stats.starttime.datetime.replace(tzinfo=None))
+            num_times = t0 + tr.times() / 86400.0
             
             # 파형 정규화: 상하 관측소 파형이 딱 맞닿도록 최대 진폭을 0.5로 제한 (-0.5 ~ 0.5)
             data = tr.data
@@ -583,13 +641,14 @@ class MultiStationPicker:
             # 파형 그리기
             self.ax_stack.plot(num_times, norm_data + y_pos, 'k-', lw=0.5, picker=False)
             
-            # P파 마커 표시 (드래그 가능하도록 axvline 대신 plot 사용)
-            line_p, = self.ax_stack.plot([p_num, p_num], [y_pos - 0.5, y_pos + 0.5], 'r-', lw=2, alpha=0.8, picker=True, pickradius=5)
-            self.zstack_lines[(sta, 'p')] = line_p
+            # P파 마커 표시 (범위 내일 때만 그림)
+            if valid_start_time <= p_num <= valid_end_time:
+                line_p, = self.ax_stack.plot([p_num, p_num], [y_pos - 0.5, y_pos + 0.5], 'r-', lw=2, alpha=0.8, picker=True, pickradius=5)
+                self.zstack_lines[(sta, 'p')] = line_p
             
-            # S파 마커 표시
+            # S파 마커 표시 (범위 내일 때만 그림)
             s_num = self.picks_db[sta]['s']['mpl_num']
-            if s_num is not None:
+            if s_num is not None and valid_start_time <= s_num <= valid_end_time:
                 line_s, = self.ax_stack.plot([s_num, s_num], [y_pos - 0.5, y_pos + 0.5], 'b-', lw=2, alpha=0.8, picker=True, pickradius=5)
                 self.zstack_lines[(sta, 's')] = line_s
             
@@ -609,12 +668,13 @@ class MultiStationPicker:
         current_bottom = max(bottom_y_limit, current_top - view_size)
         self.ax_stack.set_ylim(current_bottom, current_top)
         
-        # --- 왼쪽 스크롤바(Slider) 추가 로직 ---
+        # --- 오른쪽 스크롤바(Slider) 추가 로직 ---
         if total_picked > 8:
             from matplotlib.widgets import Slider
             
-            # 스크롤바 위치 지정: ax_stack의 왼쪽에 세로로 길게
-            ax_scroll = self.fig_stack.add_axes([0.02, 0.1, 0.02, 0.8], facecolor='lightgoldenrodyellow')
+            # 스크롤바 위치 지정: ax_stack의 오른쪽에 세로로 길게 (기존 0.02에서 0.96 근처로 이동)
+            plt.subplots_adjust(left=0.08, right=0.92, top=0.9, bottom=0.1)
+            ax_scroll = self.fig_stack.add_axes([0.94, 0.1, 0.02, 0.8], facecolor='lightgoldenrodyellow')
             
             # 슬라이더 생성 (최솟값: 바닥, 최댓값: 맨 위). 초기값은 맨 위.
             # 스크롤 핸들을 아래로 내리면(값이 작아지면) 아래쪽 파형이 보이도록 뷰가 내려감.
@@ -641,7 +701,25 @@ class MultiStationPicker:
                 
             self.zstack_slider.on_changed(update_scroll)
 
-        self.ax_stack.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+        # --- X축 범위 자동 조절 로직 ---
+        if all_pick_times:
+            # P파(빨간 선)들만 모아서 범위 계산
+            p_pick_times = [p_num for sta, p_num in picked_stas]
+            if p_pick_times:
+                min_x = min(p_pick_times)
+                max_x = max(p_pick_times)
+                
+                # 첫 P파 도달시간 10초 전, 마지막 P파 도달시간 60초 후
+                margin_left = 10 / 86400.0  # 10초
+                margin_right = 60 / 86400.0 # 60초
+                
+                self.ax_stack.set_xlim(min_x - margin_left, max_x + margin_right)
+
+        locator = mdates.AutoDateLocator(maxticks=10)
+        formatter = mdates.AutoDateFormatter(locator)
+        self.ax_stack.xaxis.set_major_locator(locator)
+        self.ax_stack.xaxis.set_major_formatter(formatter)
+        
         plt.setp(self.ax_stack.get_xticklabels(), rotation=30, ha='right')
         self.ax_stack.set_title("Z-Component Record Section (Drag Picks | Scroll Left Bar | Scroll Wheel to Zoom X)")
         self.ax_stack.grid(True, linestyle=':', alpha=0.5)
@@ -725,15 +803,16 @@ class MultiStationPicker:
         for comp_key, ax in zip(['Z', 'N', 'E'], [self.ax_z, self.ax_n, self.ax_e]):
             tr = comps[comp_key]
             if tr:
-                t_start = tr.stats.starttime
-                dt_times = [(t_start + s).datetime.replace(tzinfo=None) for s in tr.times()]
-                ax.plot(dt_times, tr.data, 'k-', linewidth=0.5)
+                # 벡터화 시간 계산
+                t0 = mdates.date2num(tr.stats.starttime.datetime.replace(tzinfo=None))
+                num_times = t0 + tr.times() / 86400.0
+                ax.plot(num_times, tr.data, 'k-', linewidth=0.5)
                 
                 # 단위 표시 제거, 채널명만 표시
                 ax.set_ylabel(f"{tr.stats.channel}", fontsize=9)
                 
-                t_num_start = mdates.date2num(dt_times[0])
-                t_num_end = mdates.date2num(dt_times[-1])
+                t_num_start = num_times[0]
+                t_num_end = num_times[-1]
                 min_mpl, max_mpl = min(min_mpl, t_num_start), max(max_mpl, t_num_end)
             
             # Y축 스케일 자동 재조정 (Count <-> Velocity 변환 시 필수)
@@ -748,10 +827,11 @@ class MultiStationPicker:
                 ch = tr.stats.channel.upper()
                 color = 'red' if ch.endswith('P') else 'blue' if ch.endswith('S') else None
                 if color:
-                    dt_times = [(tr.stats.starttime + s).datetime.replace(tzinfo=None) for s in tr.times()]
+                    t0 = mdates.date2num(tr.stats.starttime.datetime.replace(tzinfo=None))
+                    num_times = t0 + tr.times() / 86400.0
                     for prob_ax in [self.ax_z_prob, self.ax_n_prob, self.ax_e_prob]:
-                        prob_ax.fill_between(dt_times, 0, tr.data, color=color, alpha=0.15)
-                        prob_ax.plot(dt_times, tr.data, color=color, alpha=0.4, linewidth=0.8)
+                        prob_ax.fill_between(num_times, 0, tr.data, color=color, alpha=0.15)
+                        prob_ax.plot(num_times, tr.data, color=color, alpha=0.4, linewidth=0.8)
 
         # 피킹 선 그리기
         for phase in ['p', 's']:
@@ -763,7 +843,11 @@ class MultiStationPicker:
             margin = (max_mpl - min_mpl) * 0.05
             if margin == 0: margin = 1 / 86400
             self.ax_e.set_xlim([min_mpl - margin, max_mpl + margin])
-            self.ax_e.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=10))
+            
+            locator = mdates.AutoDateLocator(maxticks=10)
+            formatter = mdates.AutoDateFormatter(locator)
+            self.ax_e.xaxis.set_major_locator(locator)
+            self.ax_e.xaxis.set_major_formatter(formatter)
 
         self._update_title_only()
         self.fig.canvas.draw()
@@ -807,8 +891,8 @@ class MultiStationPicker:
         self.fig.canvas.draw_idle()
 
     def on_key(self, event):
-        if event.key in ['right', 'n']: self._btn_next_clicked(None)
-        elif event.key in ['left', 'b']: self._btn_prev_clicked(None)
+        if event.key in ['right', 'n', 'pagedown']: self._btn_next_clicked(None)
+        elif event.key in ['left', 'b', 'pageup']: self._btn_prev_clicked(None)
         elif event.inaxes and event.key in ['p', 's']:
             self._draw_lines(event.key, event.xdata)
             self.fig.canvas.draw()
@@ -843,12 +927,12 @@ class MultiStationPicker:
                         d = self.picks_db[sta][ph]
                         if d['mpl_num'] is not None:
                             t = mdates.num2date(d['mpl_num'])
-                            # picks_filtered.csv 포맷: 2026-03-11T09:06:18.368400Z
                             time_str = t.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
-                            writer.writerow([sta, ph.upper(), time_str, d['conf']])
+                            conf_str = f"{float(d['conf']):.4f}"
+                            writer.writerow([sta, ph.upper(), time_str, conf_str])
             print(f"[*] 결과 저장 완료: {out}")
             if event:
-                self.ax_z.set_title("✔ SAVED SUCCESS!", color='red', fontweight='bold')
+                self.ax_z.set_title("[SAVED SUCCESS!]", color='red', fontweight='bold')
                 self.fig.canvas.draw()
         except Exception as e:
             print(f"[-] 저장 실패: {e}")
