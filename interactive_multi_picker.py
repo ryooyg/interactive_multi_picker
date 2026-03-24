@@ -20,8 +20,9 @@ else: # Linux
 plt.rc('axes', unicode_minus=False) # Prevent minus sign breaking
 
 class MultiStationPicker:
-    def __init__(self, mseed_file, apply_filter=False, auto_picks_file=None, ai_model=None, pretrained="original", inv_file=None, output_dir="."):
+    def __init__(self, mseed_file, apply_filter=False, auto_picks_file=None, ai_model=None, pretrained="original", inv_file=None, output_dir=".", batch_mode=False):
         self.output_dir = output_dir
+        self.batch_mode = batch_mode
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir, exist_ok=True)
             
@@ -85,11 +86,29 @@ class MultiStationPicker:
         self.dragging = None
         self.ai_annotations = {} # Probability curve storage
         
-        # 3. Initialize UI and graphs
         if not self.station_names:
-            print("[-] No station data to display.")
+            print("[-] No station data to process.")
             return
-            
+
+        # --- Batch Mode Execution ---
+        if self.batch_mode:
+            print(f"\n[*] Running in BATCH MODE")
+            if ai_model:
+                self._run_ai_picker(self.ai_model)
+            elif self.auto_picks_file:
+                self._load_auto_picks()
+                
+            if self.inv:
+                self._btn_locate_clicked(None)
+            else:
+                print("[-] Skipping location calculation (No --inv provided in batch mode).")
+                
+            self._save_to_csv()
+            self._generate_batch_waveform_plots()
+            print("[*] Batch processing completed.")
+            return
+
+        # 3. Initialize UI and graphs (Interactive Mode only)
         self._setup_plot()
 
         # 4. Load auto picks or perform AI picking (execute after UI is ready)
@@ -526,8 +545,7 @@ class MultiStationPicker:
         self.fig.canvas.draw_idle()
 
     def _btn_exit_clicked(self, event):
-        print("\n[*] Exit button clicked. Saving data and exiting.")
-        self._save_to_csv()
+        print("\n[*] Exit button clicked. Exiting.")
         plt.close(self.fig)
 
     def _sync_resp_button(self):
@@ -645,6 +663,8 @@ class MultiStationPicker:
         # Z-Stack specific state variable storage for drag and drop
         self.zstack_lines = {} # { (sta, phase): Line2D_object }
         self.zstack_dragging = None # Currently dragged line info (sta, phase)
+        self.zstack_y_to_sta = {} # { y_pos: sta }
+        self.zstack_sta_to_y = {} # { sta: y_pos }
         
         print(f"[*] Z-Stack: Sorting complete for {len(picked_stas)} stations.")
         
@@ -682,6 +702,8 @@ class MultiStationPicker:
                 
             # Y-axis index: reverse order so the earliest (0th) station is at the top (largest Y value)
             y_pos = total_picked - 1 - i  
+            self.zstack_y_to_sta[y_pos] = sta
+            self.zstack_sta_to_y[sta] = y_pos
             
             # Draw waveform
             self.ax_stack.plot(num_times, norm_data + y_pos, 'k-', lw=0.5, picker=False)
@@ -774,10 +796,64 @@ class MultiStationPicker:
         self.fig_stack.canvas.mpl_connect('button_press_event', self._on_zstack_press)
         self.fig_stack.canvas.mpl_connect('motion_notify_event', self._on_zstack_motion)
         self.fig_stack.canvas.mpl_connect('button_release_event', self._on_zstack_release)
+        self.fig_stack.canvas.mpl_connect('key_press_event', self._on_zstack_key)
+        
+        # Add instruction text at the bottom
+        self.fig_stack.text(0.5, 0.02, "Keys: [p] Pick P-wave | [s] Pick S-wave | [c] Clear Picks | Mouse Wheel: Zoom X", 
+                            ha='center', fontsize=9, color='gray', fontstyle='italic')
         
         self.fig_stack.show()
 
     # --- Z-Stack specific event handlers ---
+    def _on_zstack_key(self, event):
+        if event.inaxes != self.ax_stack: return
+        if event.ydata is None or event.xdata is None: return
+        
+        y_idx = int(round(event.ydata))
+        if y_idx not in self.zstack_y_to_sta: return
+        
+        sta = self.zstack_y_to_sta[y_idx]
+        
+        if event.key == 'p':
+            self._update_zstack_line(sta, 'p', event.xdata)
+        elif event.key == 's':
+            self._update_zstack_line(sta, 's', event.xdata)
+        elif event.key == 'c':
+            self._clear_zstack_lines(sta)
+            
+        self.fig_stack.canvas.draw_idle()
+        
+        # Sync with main window if the modified station is currently displayed
+        if hasattr(self, 'fig') and plt.fignum_exists(self.fig.number):
+            if self.station_names[self.current_idx] == sta:
+                if event.key == 'c':
+                    self._draw_current_station()
+                else:
+                    self._draw_lines(event.key, event.xdata)
+                    self.fig.canvas.draw_idle()
+
+    def _update_zstack_line(self, sta, phase, x_num):
+        y_pos = self.zstack_sta_to_y[sta]
+        self.picks_db[sta][phase] = {'mpl_num': x_num, 'conf': 1.0}
+        color = 'r-' if phase == 'p' else 'b-'
+        
+        if (sta, phase) in self.zstack_lines and self.zstack_lines[(sta, phase)] is not None:
+            # Update existing
+            line = self.zstack_lines[(sta, phase)]
+            line.set_data([x_num, x_num], [y_pos - 0.5, y_pos + 0.5])
+        else:
+            # Create new
+            line, = self.ax_stack.plot([x_num, x_num], [y_pos - 0.5, y_pos + 0.5], color, lw=2, alpha=0.8, picker=True, pickradius=5)
+            self.zstack_lines[(sta, phase)] = line
+
+    def _clear_zstack_lines(self, sta):
+        self.picks_db[sta]['p'] = {'mpl_num': None, 'conf': 0.0}
+        self.picks_db[sta]['s'] = {'mpl_num': None, 'conf': 0.0}
+        for phase in ['p', 's']:
+            if (sta, phase) in self.zstack_lines and self.zstack_lines[(sta, phase)] is not None:
+                self.zstack_lines[(sta, phase)].remove()
+                self.zstack_lines[(sta, phase)] = None
+
     def _on_zstack_scroll(self, event):
         if event.inaxes != self.ax_stack: return
         
@@ -987,15 +1063,17 @@ class MultiStationPicker:
         valid_p_picks = [p['p']['mpl_num'] for p in self.picks_db.values() if p['p']['mpl_num'] is not None]
         if not valid_p_picks:
             print("[-] No P-picks available for location.")
-            self.ax_z.set_title(" Cannot locate: No P-picks available ", color='red', fontweight='bold')
-            self.fig.canvas.draw_idle()
+            if hasattr(self, 'fig'):
+                self.ax_z.set_title(" Cannot locate: No P-picks available ", color='red', fontweight='bold')
+                self.fig.canvas.draw_idle()
             return
         ref_time = UTCDateTime(mdates.num2date(min(valid_p_picks)).replace(tzinfo=None))
 
         print("[*] Calculating hypocenter...")
-        self.fig.suptitle(" Calculating Hypocenter... Please wait ", color='blue', fontweight='bold', fontsize=12, y=0.88)
-        self.fig.canvas.draw_idle()
-        self.fig.canvas.flush_events()
+        if hasattr(self, 'fig'):
+            self.fig.suptitle(" Calculating Hypocenter... Please wait ", color='blue', fontweight='bold', fontsize=12, y=0.88)
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
 
         try:
             # 1. Locate
@@ -1052,25 +1130,27 @@ class MultiStationPicker:
 
             # 3. Plot Map
             print("[*] Generating location map...")
-            map_path = plot_map(est_lat, est_lon, used_stations, origin_time=origin_time, magnitude=total_ml, output_dir=self.output_dir, show_plot=True)
+            map_path = plot_map(est_lat, est_lon, used_stations, origin_time=origin_time, magnitude=total_ml, output_dir=self.output_dir, show_plot=not self.batch_mode)
             if map_path:
                 res_str += f"\n\nMap saved to:\n{map_path}"
 
-            # Update UI Result (Top position)
-            title_res = f"Loc: {origin_time.strftime('%H:%M:%S.%f')[:-3]} | {est_lat:.4f}N, {est_lon:.4f}E | Dep: {est_depth:.1f}km{ml_str}"
-            self.fig.suptitle(title_res, color='green', fontweight='bold', fontsize=12, y=0.88)
-            self.fig.canvas.draw_idle()
+            # Update UI Result (Top position) - Only if not batch mode
+            if not self.batch_mode and hasattr(self, 'fig'):
+                title_res = f"Loc: {origin_time.strftime('%H:%M:%S.%f')[:-3]} | {est_lat:.4f}N, {est_lon:.4f}E | Dep: {est_depth:.1f}km{ml_str}"
+                self.fig.suptitle(title_res, color='green', fontweight='bold', fontsize=12, y=0.88)
+                self.fig.canvas.draw_idle()
 
-            import tkinter as tk
-            from tkinter import messagebox
-            root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True)
-            messagebox.showinfo("Hypocenter Location Result", res_str, parent=root)
-            root.destroy()
+                import tkinter as tk
+                from tkinter import messagebox
+                root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True)
+                messagebox.showinfo("Hypocenter Location Result", res_str, parent=root)
+                root.destroy()
 
         except Exception as e:
             print(f"[-] Analysis failed: {e}")
-            self.fig.suptitle(f" Analysis Failed: {e} ", color='red', fontweight='bold', fontsize=12, y=0.88)
-            self.fig.canvas.draw_idle()
+            if hasattr(self, 'fig'):
+                self.fig.suptitle(f" Analysis Failed: {e} ", color='red', fontweight='bold', fontsize=12, y=0.88)
+                self.fig.canvas.draw_idle()
 
     def _save_to_csv(self, event=None):
         out = os.path.join(self.output_dir, "refined_picks.csv")
@@ -1087,11 +1167,98 @@ class MultiStationPicker:
                             conf_str = f"{float(d['conf']):.4f}"
                             writer.writerow([sta, ph.upper(), time_str, conf_str])
             print(f"[*] Results saved: {out}")
-            if event:
+            if event and hasattr(self, 'ax_z'):
                 self.ax_z.set_title("[SAVED SUCCESS!]", color='red', fontweight='bold')
                 self.fig.canvas.draw()
         except Exception as e:
             print(f"[-] Failed to save: {e}")
+
+    def _generate_batch_waveform_plots(self):
+        """Generate static Z-stack waveform plots (15 stations per page) in batch mode."""
+        print("[*] Generating batch waveform plots...")
+        picked_stas = []
+        for sta in self.station_names:
+            p_num = self.picks_db[sta]['p']['mpl_num']
+            if p_num is not None:
+                picked_stas.append((sta, p_num))
+        
+        if not picked_stas:
+            print("[-] No P-wave picks available to plot.")
+            return
+            
+        picked_stas.sort(key=lambda x: x[1])
+        first_p_time = picked_stas[0][1]
+        
+        # Extend X-axis to 150 seconds (starting 10s before first P-wave)
+        xlim_min = first_p_time - (10 / 86400.0)
+        xlim_max = xlim_min + (150 / 86400.0)
+
+        batch_size = 15
+        total_stations = len(picked_stas)
+        num_pages = int(np.ceil(total_stations / batch_size))
+
+        for page in range(num_pages):
+            start_idx = page * batch_size
+            end_idx = min((page + 1) * batch_size, total_stations)
+            page_stas = picked_stas[start_idx:end_idx]
+            
+            fig, ax = plt.subplots(figsize=(10, 8))
+            plt.subplots_adjust(left=0.15, right=0.95, top=0.9, bottom=0.1)
+            
+            yticks = []
+            yticklabels = []
+            
+            n_stas_in_page = len(page_stas)
+            for i, (sta, p_num) in enumerate(page_stas):
+                if sta not in self.stations:
+                    self._process_station(sta)
+                
+                tr = self.stations[sta]['Z']
+                if tr is None: continue
+                    
+                t0 = mdates.date2num(tr.stats.starttime.datetime.replace(tzinfo=None))
+                num_times = t0 + tr.times() / 86400.0
+                
+                data = tr.data
+                max_val = np.max(np.abs(data))
+                norm_data = (data / max_val) * 0.5 if max_val > 0 else data
+                
+                # Reverse order: earliest at top
+                y_pos = n_stas_in_page - 1 - i  
+                
+                ax.plot(num_times, norm_data + y_pos, 'k-', lw=0.5)
+                
+                # Plot P pick
+                ax.plot([p_num, p_num], [y_pos - 0.5, y_pos + 0.5], 'r-', lw=2, alpha=0.8)
+                
+                # Plot S pick if available
+                s_num = self.picks_db[sta]['s']['mpl_num']
+                if s_num is not None:
+                    ax.plot([s_num, s_num], [y_pos - 0.5, y_pos + 0.5], 'b-', lw=2, alpha=0.8)
+                
+                yticks.append(y_pos)
+                yticklabels.append(sta)
+                
+            ax.set_yticks(yticks)
+            ax.set_yticklabels(yticklabels)
+            ax.set_ylim(-0.5, n_stas_in_page - 0.5)
+            ax.set_xlim(xlim_min, xlim_max)
+            
+            locator = mdates.AutoDateLocator(maxticks=10)
+            formatter = mdates.AutoDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+            plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
+            
+            ax.set_title(f"Z-Component Record Section (Page {page+1}/{num_pages})")
+            ax.grid(True, linestyle=':', alpha=0.5)
+            
+            # Save figure
+            out_filename = f"record_section_page_{page+1:02d}.png"
+            out_path = os.path.join(self.output_dir, out_filename)
+            plt.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            print(f"[*] Saved waveform plot: {out_path}")
 
     def show(self):
         plt.show()
@@ -1106,6 +1273,7 @@ def main():
     parser.add_argument("--pretrained", default="original", help="SeisBench pre-trained weights (e.g., original, stead, ethz, etc.)")
     parser.add_argument("--inv", default="total_inv.xml", help="Path to Inventory XML file (for instrument response removal)")
     parser.add_argument("--output", default=None, help="Output directory for results (default: mseed_dir + '_out')")
+    parser.add_argument("--batch", action="store_true", help="Run in headless batch mode: auto-pick -> locate -> save -> exit without opening GUI")
     args = parser.parse_args()
     
     # Auto-generate output directory if not provided
@@ -1126,8 +1294,8 @@ def main():
             
         print(f"[*] Output directory automatically set to: {args.output}")
     
-    picker = MultiStationPicker(args.mseed, args.filter, args.picks, args.model, args.pretrained, args.inv, args.output)
-    if hasattr(picker, 'fig'): 
+    picker = MultiStationPicker(args.mseed, args.filter, args.picks, args.model, args.pretrained, args.inv, args.output, args.batch)
+    if not args.batch and hasattr(picker, 'fig'): 
         picker.show()
 
 if __name__ == "__main__":

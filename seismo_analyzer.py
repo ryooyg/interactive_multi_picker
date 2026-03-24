@@ -141,8 +141,8 @@ def plot_map(eq_lat, eq_lon, used_stations, origin_time=None, magnitude=None, ou
     fig = plt.figure(figsize=(10, 10))
     ax = plt.axes(projection=ccrs.PlateCarree())
     
-    # Zoom in around the epicenter (+/- 2 degrees)
-    ax.set_extent([eq_lon - 2.5, eq_lon + 2.5, eq_lat - 2.5, eq_lat + 2.5], crs=ccrs.PlateCarree())
+    # Zoom in around the epicenter (+/- 3.5 degrees)
+    ax.set_extent([eq_lon - 3.5, eq_lon + 3.5, eq_lat - 3.5, eq_lat + 3.5], crs=ccrs.PlateCarree())
 
     ax.add_feature(cfeature.LAND, edgecolor='black', facecolor='whitesmoke')
     ax.add_feature(cfeature.OCEAN, facecolor='lightblue')
@@ -166,6 +166,12 @@ def plot_map(eq_lat, eq_lon, used_stations, origin_time=None, magnitude=None, ou
     # Plot epicenter
     ax.plot(eq_lon, eq_lat, 'r*', markersize=20, markeredgecolor='black', transform=ccrs.PlateCarree(), label='Epicenter', zorder=5)
     
+    # Add coordinates label above the epicenter
+    coords_text = f"({eq_lat:.4f}N, {eq_lon:.4f}E)"
+    ax.text(eq_lon, eq_lat + 0.15, coords_text, 
+            transform=ccrs.PlateCarree(), fontsize=11, fontweight='bold', color='darkred',
+            ha='center', va='bottom', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=2), zorder=6)
+    
     ax.gridlines(draw_labels=True, linestyle='--', alpha=0.5)
     
     title_str = 'Earthquake Location Map'
@@ -188,6 +194,42 @@ def plot_map(eq_lat, eq_lon, used_stations, origin_time=None, magnitude=None, ou
         try:
             fig.canvas.manager.set_window_title('Earthquake Location Map')
         except: pass
+        
+        # --- Add Zoom In/Out Interaction ---
+        def on_map_scroll(event):
+            if event.inaxes != ax: return
+            
+            # Get current extent
+            x0, x1, y0, y1 = ax.get_extent(crs=ccrs.PlateCarree())
+            
+            # Zoom factor
+            scale = 1/1.5 if event.button == 'up' else 1.5
+            
+            # Calculate new width and height
+            w = x1 - x0
+            h = y1 - y0
+            
+            # Adjust extent relative to cursor position
+            new_w = w * scale
+            new_h = h * scale
+            
+            rel_x = (event.xdata - x0) / w
+            rel_y = (event.ydata - y0) / h
+            
+            new_x0 = event.xdata - new_w * rel_x
+            new_x1 = event.xdata + new_w * (1 - rel_x)
+            new_y0 = event.ydata - new_h * rel_y
+            new_y1 = event.ydata + new_h * (1 - rel_y)
+            
+            # Apply new extent
+            ax.set_extent([new_x0, new_x1, new_y0, new_y1], crs=ccrs.PlateCarree())
+            fig.canvas.draw_idle()
+            
+        fig.canvas.mpl_connect('scroll_event', on_map_scroll)
+        
+        # Add instruction text at the bottom
+        fig.text(0.5, 0.02, "Use Mouse Wheel to Zoom In/Out", ha='center', fontsize=10, color='gray', fontstyle='italic')
+        
         fig.show()
     else:
         plt.close(fig)
