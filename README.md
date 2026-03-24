@@ -52,7 +52,7 @@ python interactive_multi_picker.py --mseed ./data/your_waveform_data.mseed --inv
 
 ### Batch Mode Command (Headless)
 ```bash
-python interactive_multi_picker.py --mseed ./data/20260311/* --model eqtransformer --pretrained korea --inv ./total_inv.xml --batch
+python interactive_multi_picker.py --mseed ./data/20260311/* --model eqtransformer --pretrained stead --inv ./total_inv.xml --batch
 ```
 
 ### Advanced Command (GUI)
