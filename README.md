@@ -7,10 +7,12 @@ A Python-based interactive GUI tool for visualizing seismograms, manually pickin
 - **3-Component Visualization**: View Vertical (Z), North (N), and East (E) components simultaneously.
 - **Interactive Picking**: Easily mark and adjust P (red) and S (blue) wave arrivals using mouse clicks, drag-and-drop, and keyboard shortcuts.
 - **Deep Learning Integration**: Run **EQTransformer** or **PhaseNet** (via `SeisBench`) on the fly. Generates automatic picks and visualizes continuous probability curves as background shading on the waveforms.
+- **Hypocenter & Magnitude Analysis**: Automatically calculate earthquake location (Lat, Lon, Depth, Origin Time) and Local Magnitude (ML) using picked phases.
+- **Interactive Mapping**: Generate high-quality location maps with station labels and event parameters (time, magnitude) using `Cartopy`.
 - **Z-Stack (Record Section) View**: Automatically aligns and stacks the Z-components of all picked stations, sorted by P-wave arrival time. This view smartly zooms into the temporal region of interest, allowing you to drag and adjust picks across multiple stations at a glance.
 - **High-Precision Time Handling**: Uses vectorized time arrays and Matplotlib's `AutoDateFormatter` to prevent float precision loss, ensuring accurate visual alignment of waveforms and picks down to the microsecond level during extreme zooming.
 - **On-the-fly Signal Processing**: Toggle a 1-10Hz bandpass filter or remove instrument responses (velocity output) in real-time.
-- **Data I/O**: Import preliminary picks from a CSV file and export your finalized, refined picks to `refined_picks.csv`.
+- **Advanced Data I/O**: Export detailed location reports, station-specific magnitude CSVs, and refined pick files to a user-specified output directory.
 
 ---
 
@@ -40,7 +42,7 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate | macOS/Linux: source .venv/bin/activate
 
 # Install dependencies
-pip install obspy numpy pandas matplotlib Pillow
+pip install obspy numpy pandas matplotlib Pillow scipy cartopy
 
 # For AI features:
 pip install seisbench torch
@@ -54,7 +56,7 @@ Run the script from the command line, providing the target MiniSEED file.
 
 ### Basic Command
 ```bash
-python interactive_multi_picker.py --mseed ./data/your_waveform_data.mseed
+python interactive_multi_picker.py --mseed ./data/your_waveform_data.mseed --inv ./metadata/total_inv.xml
 ```
 
 ### Advanced Command
@@ -65,68 +67,54 @@ python interactive_multi_picker.py \
     --filter \
     --model eqtransformer \
     --pretrained stead \
-    --inv ./metadata/total_inv.xml
+    --inv ./metadata/total_inv.xml \
+    --output ./results/event_01
 ```
 
 ### CLI Arguments
-*   `--mseed` (Required): Path to the MiniSEED waveform data file.
-*   `--picks`: Path to a CSV file containing initial/auto picks to load on startup.
+*   `--mseed` (Required): Path to the MiniSEED waveform data file. Supports wildcards (e.g., `./data/20260311/*`).
+*   `--picks`: Path to a CSV file containing initial/auto picks. **If provided with `--inv`, the tool will automatically calculate the hypocenter, magnitude, and generate a map upon startup.**
 *   `--filter`: Flag to apply a basic 1-10Hz Bandpass filter automatically.
 *   `--model`: AI model to use for automatic picking (`eqtransformer` or `phasenet`).
 *   `--pretrained`: Pretrained weights for the AI model. Options: `original`, `stead`, `ethz`, or `korea`. Default is `original`.
-*   `--inv`: Path to the StationXML file (`.xml`) for instrument response removal.
+*   `--inv`: Path to the StationXML file (`.xml`) for instrument response removal and **hypocenter location**.
+*   `--output`: Directory to save all results (CSV, TXT, PNG). 
+    *   **Smart Default**: If not provided, it automatically creates a folder based on your input. For a single file `event.mseed`, it creates `event_out/`. For a wildcard path `data/event_dir/*`, it smartly creates `data/event_dir_out/`.
 
 ### 🇰🇷 Using Custom 'Korea' Weights
 You can use locally trained weights specifically optimized for the Korean peninsula. 
-1. Place the trained weight files (`eqtransformer_korea.pth` and/or `phasenet_korea.pth`) directly in the **root directory of this project** (the same folder as `interactive_multi_picker.py`).
-2. Run the tool using the `--pretrained korea` flag:
-
-```bash
-uv run interactive_multi_picker.py --mseed ./data/waveforms.mseed --model eqtransformer --pretrained korea
-```
+1. Place the trained weight files (`eqtransformer_korea.pth` and/or `phasenet_korea.pth`) directly in the **root directory of this project**.
+2. Run the tool using the `--pretrained korea` flag.
 
 ---
 
 ## 🎮 Controls & Shortcuts
 
-The GUI is designed for rapid operation without needing to click through menus.
-
 ### Mouse Controls
-*   **Left Click + Drag**: Drag the vertical Red (P) or Blue (S) lines to precisely adjust the arrival time.
+*   **Left Click + Drag**: Drag vertical Red (P) or Blue (S) lines to adjust arrival times.
 *   **Scroll Wheel**: Zoom in/out horizontally (Time axis).
 
 ### Keyboard Shortcuts
-*   `p`: Set the **P-wave** pick at the current mouse cursor location.
-*   `s`: Set the **S-wave** pick at the current mouse cursor location.
-*   `c`: **Clear** both P and S picks for the currently displayed station.
-*   `Right Arrow`, `n`, or `Page Down`: Move to the **Next** station.
-*   `Left Arrow`, `b`, or `Page Up`: Move to the **Previous** station.
+*   `p`: Set **P-wave** pick at cursor.
+*   `s`: Set **S-wave** pick at cursor.
+*   `c`: **Clear** picks for the current station.
+*   `Right Arrow` / `Page Down`: **Next** station.
+*   `Left Arrow` / `Page Up`: **Previous** station.
 
 ### GUI Buttons
-*   **< / >**: Navigate between stations.
-*   **EQTRANSFORMER / PHASENET**: Toggle the active AI model.
-*   **W: ORIGINAL / STEAD / ETHZ**: Toggle the AI model's pretrained weights.
+*   **Locate**: Calculate hypocenter and magnitude (ML), save reports, and display the map. (Requires ≥3 P-picks and `--inv`).
 *   **AI Pick**: Execute the selected AI model on the *current* station.
-*   **Filter: ON/OFF**: Toggle the 1-10Hz bandpass filter globally.
-*   **Resp: ON/OFF**: Toggle instrument response removal for the *current* station (requires `--inv`).
-*   **Clear**: Delete picks for the current station.
-*   **Z-Stack**: Open the multi-station Record Section view (requires at least 1 P-pick).
-*   **SAVE**: Export the current state of all picks to `refined_picks.csv`.
-*   **EXIT**: Save and safely close the application.
+*   **Z-Stack**: Open the multi-station Record Section view.
+*   **SAVE**: Export refined picks to `refined_picks.csv`.
+*   **EXIT**: Save and close.
 
 ---
 
-## 📂 Output Format
+## 📂 Output Files
 
-When you click **SAVE** or **EXIT**, the tool writes all active picks to `refined_picks.csv` in the current directory.
+All outputs are saved in the directory specified by `--output`.
 
-**Format example (`refined_picks.csv`):**
-```csv
-Network_Station,Phase,Arrival_Time,Confidence
-IU.INCN,P,2025-11-25T09:01:40.050000Z,0.95
-KS.CGWB,P,2025-11-25T09:02:09.228285Z,1.0000
-KS.CGWB,S,2025-11-25T09:02:47.285756Z,1.0000
-KS.CIGB,P,2025-11-25T09:02:25.538630Z,1.0000
-KS.CIGB,S,2025-11-25T09:03:13.563534Z,1.0000
-```
-*(Note: Manual picks are saved with a default confidence of 1.0)*
+1.  **`refined_picks.csv`**: Finalized P and S arrival times.
+2.  **`location_report.txt`**: Detailed text report including Origin Time, Lat/Lon, Depth, ML, and residuals.
+3.  **`station_magnitudes.csv`**: Per-channel magnitude calculations (Distance, Amplitude, ML).
+4.  **`location_map.png`**: Visual map showing the epicenter and used stations with event info in the title.

@@ -20,7 +20,11 @@ else: # Linux
 plt.rc('axes', unicode_minus=False) # Prevent minus sign breaking
 
 class MultiStationPicker:
-    def __init__(self, mseed_file, apply_filter=False, auto_picks_file=None, ai_model=None, pretrained="original", inv_file=None):
+    def __init__(self, mseed_file, apply_filter=False, auto_picks_file=None, ai_model=None, pretrained="original", inv_file=None, output_dir="."):
+        self.output_dir = output_dir
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir, exist_ok=True)
+            
         # Disable default matplotlib shortcuts (prevent s for save, etc. - global setting before figure creation)
         plt.rcParams['keymap.save'] = ''
         plt.rcParams['keymap.fullscreen'] = ''
@@ -97,9 +101,37 @@ class MultiStationPicker:
         # Draw the first screen reflecting the results (must run after step 4)
         self._draw_current_station()
 
+        # 5. Auto-locate if picks were provided
+        if self.auto_picks_file and self.inv:
+            print("\n[*] Initializing Auto-Locate from provided picks...")
+            # We use a slight delay using a timer so the UI has time to render fully first
+            timer = self.fig.canvas.new_timer(interval=500)
+            timer.single_shot = True
+            timer.add_callback(self._btn_locate_clicked, None)
+            timer.start()
+
     def _load_data(self):
         try:
-            self.st_raw = read(self.mseed_file)
+            import glob
+            
+            # If wildcards are used, we need to carefully collect only actual files, not directories.
+            if '*' in self.mseed_file or '?' in self.mseed_file:
+                files = [f for f in glob.glob(self.mseed_file) if os.path.isfile(f)]
+                if not files:
+                    raise ValueError(f"No files found matching: {self.mseed_file}")
+                
+                self.st_raw = Stream()
+                for f in files:
+                    try:
+                        self.st_raw += read(f)
+                    except Exception as e:
+                        print(f"[-] Warning: Failed to read {f}: {e}")
+            else:
+                self.st_raw = read(self.mseed_file)
+                
+            if len(self.st_raw) == 0:
+                raise ValueError("No valid seismic data could be loaded.")
+                
             self.st_raw.detrend('linear')
             print(f"[*] Data loaded: {len(self.st_raw)} traces")
         except Exception as e:
@@ -429,11 +461,11 @@ class MultiStationPicker:
         self.btn_weight.on_clicked(self._btn_weight_clicked)
 
         # 3. Option buttons (Center)
-        self.btn_ai = add_3d_button([0.37, y, 0.085, h], 'AI Pick', 'plum')
+        self.btn_ai = add_3d_button([0.37, y, 0.08, h], 'AI Pick', 'plum')
         self.btn_ai.on_clicked(self._btn_ai_clicked)
 
         filter_color = 'lightgreen' if self.apply_filter else 'white'
-        self.btn_filter = add_3d_button([0.46, y, 0.115, h], f'Filter: {"ON" if self.apply_filter else "OFF"}', filter_color)
+        self.btn_filter = add_3d_button([0.455, y, 0.09, h], f'Filter: {"ON" if self.apply_filter else "OFF"}', filter_color)
         self.btn_filter.on_clicked(self._btn_filter_clicked)
 
         # Initial screen station Resp status (default False -> show ON)
@@ -441,20 +473,23 @@ class MultiStationPicker:
         is_resp = self.resp_status.get(sta, False)
         resp_label = f'Resp: {"OFF" if is_resp else "ON"}'
         resp_color = 'lightblue' if is_resp else 'white'
-        self.btn_resp = add_3d_button([0.58, y, 0.10, h], resp_label, resp_color)
+        self.btn_resp = add_3d_button([0.55, y, 0.09, h], resp_label, resp_color)
         self.btn_resp.on_clicked(self._btn_resp_clicked)
 
-        self.btn_clear = add_3d_button([0.685, y, 0.055, h], 'Clear', 'white')
+        self.btn_clear = add_3d_button([0.645, y, 0.05, h], 'Clear', 'white')
         self.btn_clear.on_clicked(self._btn_clear_clicked)
 
-        self.btn_zstack = add_3d_button([0.745, y, 0.07, h], 'Z-Stack', 'mediumpurple')
+        self.btn_zstack = add_3d_button([0.70, y, 0.065, h], 'Z-Stack', 'mediumpurple')
         self.btn_zstack.on_clicked(self._btn_zstack_clicked)
+        
+        self.btn_locate = add_3d_button([0.77, y, 0.065, h], 'Locate', 'orange')
+        self.btn_locate.on_clicked(self._btn_locate_clicked)
 
         # 4. Save and Exit (Right)
-        self.btn_save = add_3d_button([0.82, y, 0.065, h], 'SAVE', 'gold')
+        self.btn_save = add_3d_button([0.84, y, 0.055, h], 'SAVE', 'gold')
         self.btn_save.on_clicked(self._save_to_csv)
 
-        self.btn_exit = add_3d_button([0.89, y, 0.065, h], 'EXIT', 'salmon')
+        self.btn_exit = add_3d_button([0.90, y, 0.055, h], 'EXIT', 'salmon')
         self.btn_exit.on_clicked(self._btn_exit_clicked)
 
         # Add kitvalley.png logo to the bottom right of the screen
@@ -800,6 +835,8 @@ class MultiStationPicker:
         for ax in [self.ax_z, self.ax_n, self.ax_e, self.ax_z_prob, self.ax_n_prob, self.ax_e_prob]: 
             ax.clear()
         
+        self.fig.suptitle("") # Clear location result when switching station
+        
         for ax in [self.ax_z_prob, self.ax_n_prob, self.ax_e_prob]:
             ax.set_ylim(0, 0.5) 
             ax.set_yticks([])
@@ -926,8 +963,117 @@ class MultiStationPicker:
 
     def on_release(self, event): self.dragging = None
 
+    def _btn_locate_clicked(self, event):
+        if not self.inv:
+            print("[-] Cannot locate without inventory (--inv) to provide station coordinates.")
+            self.ax_z.set_title(" Cannot locate: No Inventory Data (--inv) ", color='red', fontweight='bold')
+            self.fig.canvas.draw_idle()
+            return
+
+        try:
+            from seismo_analyzer import locate_hypocenter, calculate_magnitude, plot_map
+        except ImportError:
+            print("[-] seismo_analyzer.py not found in the current directory.")
+            return
+
+        # Prepare station coordinates mapping
+        station_coords = {}
+        for net in self.inv:
+            for sta_obj in net:
+                net_sta = f"{net.code}.{sta_obj.code}"
+                station_coords[net_sta] = (sta_obj.latitude, sta_obj.longitude, sta_obj.elevation)
+
+        # Get reference time (earliest P-pick)
+        valid_p_picks = [p['p']['mpl_num'] for p in self.picks_db.values() if p['p']['mpl_num'] is not None]
+        if not valid_p_picks:
+            print("[-] No P-picks available for location.")
+            self.ax_z.set_title(" Cannot locate: No P-picks available ", color='red', fontweight='bold')
+            self.fig.canvas.draw_idle()
+            return
+        ref_time = UTCDateTime(mdates.num2date(min(valid_p_picks)).replace(tzinfo=None))
+
+        print("[*] Calculating hypocenter...")
+        self.fig.suptitle(" Calculating Hypocenter... Please wait ", color='blue', fontweight='bold', fontsize=12, y=0.88)
+        self.fig.canvas.draw_idle()
+        self.fig.canvas.flush_events()
+
+        try:
+            # 1. Locate
+            est_lat, est_lon, est_depth, origin_time, used_stations, used_arrivals = locate_hypocenter(
+                self.picks_db, station_coords, ref_time
+            )
+
+            # 2. Magnitude
+            total_ml, ml_results, station_ml_details = calculate_magnitude(
+                est_lat, est_lon, origin_time, station_coords, self.stations_raw, self.inv
+            )
+
+            # --- Formatting and Reporting ---
+            ml_str = f" | ML: {total_ml:.2f}" if total_ml is not None else ""
+            res_str = f"--- Location Result ---\nOrigin Time: {origin_time}\nLatitude: {est_lat:.4f}\nLongitude: {est_lon:.4f}\nDepth: {est_depth:.2f} km\n"
+            if total_ml is not None:
+                res_str += f"Magnitude: ML {total_ml:.2f} ({len(ml_results)} channels)\n"
+            else:
+                res_str += "Magnitude: ML N/A\n"
+            res_str += f"Used Stations: {len(used_stations)}"
+
+            print(f"\n{res_str}\n")
+
+            # Save Report
+            report_path = os.path.join(self.output_dir, "location_report.txt")
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(res_str + "\n\n")
+                f.write("=== Used Stations for Location ===\n")
+                for i, s in enumerate(used_stations):
+                    t_arr = ref_time + used_arrivals[i]
+                    f.write(f"{s[0]:<12} | Lat: {s[1]:8.4f} | Lon: {s[2]:9.4f} | P-Arr: {t_arr}\n")
+                
+                if station_ml_details:
+                    f.write("\n=== Station Magnitudes ===\n")
+                    f.write(f"{'Station.Ch':<12} | {'Dist(km)':<8} | {'Amp(mm)':<10} | {'ML':<5}\n")
+                    f.write("-" * 50 + "\n")
+                    for d in sorted(station_ml_details, key=lambda x: x['dist_km']):
+                        f.write(f"{d['station']+'.'+d['comp']:<12} | {d['dist_km']:>8.1f} | {d['max_amp_mm']:>10.4e} | {d['ml']:>5.2f}\n")
+            
+            print(f"[*] Location report saved to: {report_path}")
+
+            # Save Station Magnitudes to CSV
+            if station_ml_details:
+                ml_csv_path = os.path.join(self.output_dir, "station_magnitudes.csv")
+                try:
+                    with open(ml_csv_path, 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(['Station', 'Component', 'Distance_km', 'Max_Amp_mm', 'ML'])
+                        for d in sorted(station_ml_details, key=lambda x: x['dist_km']):
+                            writer.writerow([d['station'], d['comp'], f"{d['dist_km']:.1f}", f"{d['max_amp_mm']:.6e}", f"{d['ml']:.2f}"])
+                    print(f"[*] Station magnitudes saved to: {ml_csv_path}")
+                except Exception as e:
+                    print(f"[-] Failed to save station magnitudes CSV: {e}")
+
+            # 3. Plot Map
+            print("[*] Generating location map...")
+            map_path = plot_map(est_lat, est_lon, used_stations, origin_time=origin_time, magnitude=total_ml, output_dir=self.output_dir, show_plot=True)
+            if map_path:
+                res_str += f"\n\nMap saved to:\n{map_path}"
+
+            # Update UI Result (Top position)
+            title_res = f"Loc: {origin_time.strftime('%H:%M:%S.%f')[:-3]} | {est_lat:.4f}N, {est_lon:.4f}E | Dep: {est_depth:.1f}km{ml_str}"
+            self.fig.suptitle(title_res, color='green', fontweight='bold', fontsize=12, y=0.88)
+            self.fig.canvas.draw_idle()
+
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True)
+            messagebox.showinfo("Hypocenter Location Result", res_str, parent=root)
+            root.destroy()
+
+        except Exception as e:
+            print(f"[-] Analysis failed: {e}")
+            self.fig.suptitle(f" Analysis Failed: {e} ", color='red', fontweight='bold', fontsize=12, y=0.88)
+            self.fig.canvas.draw_idle()
+
     def _save_to_csv(self, event=None):
-        out = "refined_picks.csv"
+        out = os.path.join(self.output_dir, "refined_picks.csv")
         try:
             with open(out, 'w', newline='') as f:
                 writer = csv.writer(f)
@@ -959,9 +1105,28 @@ def main():
     parser.add_argument("--model", choices=["eqtransformer", "phasenet"], help="Automatic picking using SeisBench deep learning models (optional)")
     parser.add_argument("--pretrained", default="original", help="SeisBench pre-trained weights (e.g., original, stead, ethz, etc.)")
     parser.add_argument("--inv", default="total_inv.xml", help="Path to Inventory XML file (for instrument response removal)")
+    parser.add_argument("--output", default=None, help="Output directory for results (default: mseed_dir + '_out')")
     args = parser.parse_args()
     
-    picker = MultiStationPicker(args.mseed, args.filter, args.picks, args.model, args.pretrained, args.inv)
+    # Auto-generate output directory if not provided
+    if args.output is None:
+        mseed_abs = os.path.abspath(args.mseed)
+        mseed_dir = os.path.dirname(mseed_abs)
+        mseed_name = os.path.basename(mseed_abs)
+        
+        if '*' in mseed_name or '?' in mseed_name:
+            # If wildcard used, append _out to the parent directory
+            # Example: C:\data\20260311\* -> C:\data\20260311_out
+            args.output = mseed_dir + "_out"
+        else:
+            # If specific file, create subfolder in same directory
+            # Example: C:\data\event.mseed -> C:\data\event_out
+            base_name = os.path.splitext(mseed_name)[0]
+            args.output = os.path.join(mseed_dir, f"{base_name}_out")
+            
+        print(f"[*] Output directory automatically set to: {args.output}")
+    
+    picker = MultiStationPicker(args.mseed, args.filter, args.picks, args.model, args.pretrained, args.inv, args.output)
     if hasattr(picker, 'fig'): 
         picker.show()
 
