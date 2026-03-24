@@ -5,7 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
-.gitig*
+.git*
 GEMINI.md
 
 # Virtual environments
