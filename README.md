@@ -104,3 +104,5 @@ All outputs are saved in the directory specified by `--output`.
 3.  **`station_magnitudes.csv`**: Per-channel magnitude details (Distance, Amplitude, ML).
 4.  **`location_map.png`**: Map image showing epicenter, used stations, and event parameters.
 5.  **`record_section_page_XX.png`**: (Batch mode only) Static waveform plots with 15 stations per page, sorted by arrival time. Each plot shows 150 seconds of data starting 10 seconds before the first P-arrival.
+
+
