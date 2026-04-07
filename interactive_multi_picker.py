@@ -208,19 +208,21 @@ class MultiStationPicker:
 
         try:
             if model_name.lower() == 'eqtransformer':
-                if self.pretrained.lower() == 'korea':
-                    model = sbm.EQTransformer()
-                    model.load_state_dict(torch.load("eqtransformer_korea.pth", weights_only=True))
-                    print("[*] Loaded local weights: eqtransformer_korea.pth")
-                else:
-                    model = sbm.EQTransformer.from_pretrained(self.pretrained)
+#                if self.pretrained.lower() == 'korea':
+#                    model = sbm.EQTransformer()
+#                    model.load_state_dict(torch.load("eqtransformer_korea.pth", weights_only=True))
+#                    print("[*] Loaded local weights: eqtransformer_korea.pth")
+#                else:
+                 model = sbm.EQTransformer.from_pretrained(self.pretrained)
             elif model_name.lower() == 'phasenet':
-                if self.pretrained.lower() == 'korea':
-                    model = sbm.PhaseNet()
-                    model.load_state_dict(torch.load("phasenet_korea.pth", weights_only=True))
-                    print("[*] Loaded local weights: phasenet_korea.pth")
-                else:
-                    model = sbm.PhaseNet.from_pretrained(self.pretrained)
+#                if self.pretrained.lower() == 'korea':
+#                    model = sbm.PhaseNet()
+#                    model.load_state_dict(torch.load("phasenet_korea.pth", weights_only=True))
+#                    print("[*] Loaded local weights: phasenet_korea.pth")
+#                else:
+                 model = sbm.PhaseNet.from_pretrained(self.pretrained)
+            elif model_name.lower() == 'skynet':
+                 model = sbm.Skynet.from_pretrained(self.pretrained)
             else:
                 print(f"[-] Unsupported model: {model_name}")
                 return
@@ -470,7 +472,7 @@ class MultiStationPicker:
         self.btn_next.on_clicked(self._btn_next_clicked)
 
         # 2. Cyclical model & weight selection buttons
-        self.available_models = ['eqtransformer', 'phasenet']
+        self.available_models = ['eqtransformer', 'phasenet', 'skynet']
         self.available_weights = ['original', 'stead', 'ethz']
         
         self.btn_model = add_3d_button([0.095, y, 0.145, h], self.ai_model.upper(), 'lightgoldenrodyellow')
@@ -1269,7 +1271,7 @@ def main():
     parser.add_argument("--mseed", required=True, help="Path to the MiniSEED data file to analyze")
     parser.add_argument("--picks", help="Existing picking data CSV file (leave empty if none)")
     parser.add_argument("--filter", action="store_true", help="Apply default Bandpass Filter (1-10Hz)")
-    parser.add_argument("--model", choices=["eqtransformer", "phasenet"], help="Automatic picking using SeisBench deep learning models (optional)")
+    parser.add_argument("--model", choices=["eqtransformer", "phasenet", "skynet"], help="Automatic picking using SeisBench deep learning models (optional)")
     parser.add_argument("--pretrained", default="original", help="SeisBench pre-trained weights (e.g., original, stead, ethz, etc.)")
     parser.add_argument("--inv", default="total_inv.xml", help="Path to Inventory XML file (for instrument response removal)")
     parser.add_argument("--output", default=None, help="Output directory for results (default: mseed_dir + '_out')")
